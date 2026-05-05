@@ -1,0 +1,16 @@
+# EAS Voice Controller — PC Host Requirements (Fully Local)
+# ===========================================================
+# Install with:  pip install -r requirements.txt
+#
+# Python 3.10+ recommended.
+# Ollama must be installed separately: https://ollama.com
+
+openai-whisper>=20231117
+ollama>=0.2.0
+piper-tts>=1.2.0
+openwakeword>=0.6.0
+pyserial>=3.5
+sounddevice>=0.4.6
+numpy>=1.24.0
+scipy>=1.11.0
+python-dotenv>=1.0.0
