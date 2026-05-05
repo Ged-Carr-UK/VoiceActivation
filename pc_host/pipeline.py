@@ -180,9 +180,25 @@ def synthesize_speech(text: str, voice: PiperVoice | None = None) -> bytes:
             "Piper voice not loaded. Call load_piper() before synthesize_speech()."
         )
 
-    # synthesize_stream_raw yields chunks of raw int16 PCM bytes
-    raw_chunks: list[bytes] = list(v.synthesize_stream_raw(text))
-    pcm_native = b"".join(raw_chunks)
+    # Piper API compatibility:
+    # - Older/newer builds may expose either synthesize_stream_raw(text)
+    #   or synthesize(text) -> Iterable[AudioChunk].
+    pcm_native = b""
+
+    if hasattr(v, "synthesize_stream_raw"):
+        raw_chunks: list[bytes] = list(v.synthesize_stream_raw(text))
+        pcm_native = b"".join(raw_chunks)
+    elif hasattr(v, "synthesize"):
+        chunk_bytes: list[bytes] = []
+        for chunk in v.synthesize(text):
+            if hasattr(chunk, "audio_int16_bytes"):
+                chunk_bytes.append(chunk.audio_int16_bytes)
+            else:
+                arr = chunk.audio_int16_array
+                chunk_bytes.append(arr.astype(np.int16).tobytes())
+        pcm_native = b"".join(chunk_bytes)
+    else:
+        raise RuntimeError("Unsupported Piper API: no synthesize method found")
 
     native_rate = v.config.sample_rate
     if native_rate != SAMPLE_RATE:
