@@ -5,12 +5,11 @@
  * your specific hardware wiring and requirements.
  *
  * Hardware in use:
- *   - ESP32-S3 DevKitC-1
+ *   - AZ-Delivery ESP32 (38-pin dev board)
  *   - INMP441 I2S MEMS Microphone  (I2S bus 1 — RX)
  *   - MAX98357A I2S DAC Amplifier  (I2S bus 0 — TX)
  *   - Hobby speaker 4Ω or 8Ω
- *   - WS2812B LED strip × 4 LEDs   (GPIO 48)
- *   - WS2812B single LED (built-in) (GPIO 38)  ← optional status dot
+ *   - Optional WS2812B status LEDs (pin must be updated per board wiring)
  */
 
 #pragma once
@@ -18,9 +17,9 @@
 // ─── Firmware Version ─────────────────────────────────────────────────────────
 #define FIRMWARE_VERSION "1.2.0"
 
-// ─── MICROPHONE PINS — INMP441 → ESP32-S3 (I2S Bus 1, RX) ───────────────────
+// ─── MICROPHONE PINS — INMP441 → ESP32 (I2S Bus 1, RX) ──────────────────────
 //
-//   INMP441 pin    →    ESP32-S3 GPIO
+//   INMP441 pin    →    ESP32 GPIO
 //   ───────────────────────────────────
 //   VDD            →    3.3V
 //   GND            →    GND
@@ -33,45 +32,39 @@
 #define PIN_MIC_SCK   4
 #define PIN_MIC_WS    5
 
-// ─── SPEAKER PINS — MAX98357A → ESP32-S3 (I2S Bus 0, TX) ────────────────────
+// ─── SPEAKER PINS — MAX98357A → ESP32 (I2S Bus 0, TX) ───────────────────────
 //
-//   MAX98357A pin  →    ESP32-S3 GPIO
+//   MAX98357A pin  →    ESP32 GPIO
 //   ───────────────────────────────────
 //   VIN            →    5V
 //   GND            →    GND
-//   BCLK           →    GPIO 12
-//   LRC            →    GPIO 13
+//   BCLK           →    GPIO 13
+//   LRC            →    GPIO 12
 //   DIN            →    GPIO 14
 //   GAIN           →    Leave floating (9dB default)
 //   SD             →    Leave floating (always on)
 //
-#define PIN_SPK_BCLK  12
-#define PIN_SPK_LRC   13
+#define PIN_SPK_BCLK  13
+#define PIN_SPK_LRC   12
 #define PIN_SPK_DIN   14
 #define PIN_SPK_SD    -1   // Set to a GPIO to enable software mute
 
-// ─── LED STRIP — WS2812B × 4 LEDs (hobby kit) ────────────────────────────────
-//
-//   LED Strip pin  →    ESP32-S3 GPIO
-//   ───────────────────────────────────
-//   VCC / 5V       →    5V (VIN pin)
-//   GND            →    GND
-//   DIN / DI       →    GPIO 48   ← data in
-//   DOUT / DO      →    leave unconnected
-//
-#define PIN_STRIP_DATA    48     // Data pin for the 4-LED hobby strip
+// ─── LED STRIP — WS2812B × 4 LEDs (optional) ─────────────────────────────────
+// Update PIN_STRIP_DATA to the actual GPIO used on the AZ-Delivery board
+// before re-enabling LED support.
+#define PIN_STRIP_DATA    22
 #define STRIP_NUM_LEDS    4      // Number of LEDs on the strip
 #define STRIP_BRIGHTNESS  120    // 0–255 (120 = good indoor brightness)
 
-// ─── BUILT-IN LED — single WS2812B on DevKitC-1 ──────────────────────────────
-// Mirrors the strip state. Set ENABLE_BUILTIN_LED false to disable.
-#define ENABLE_BUILTIN_LED  true
-#define PIN_BUILTIN_LED     38
+// ─── BUILT-IN LED ─────────────────────────────────────────────────────────────
+// The AZ-Delivery 38-pin ESP32 does not provide the S3's built-in WS2812 LED.
+#define ENABLE_BUILTIN_LED  false
+#define PIN_BUILTIN_LED     0
 #define BUILTIN_BRIGHTNESS  60   // Dimmer than strip — it's just a status dot
 
 // ─── Optional: Push-to-Talk Button ───────────────────────────────────────────
 #define ENABLE_PUSH_TO_TALK  false
-#define PIN_BUTTON           0   // GPIO 0 = BOOT button on DevKitC-1
+#define PIN_BUTTON           0   // GPIO 0 = BOOT button on many ESP32 dev boards
 
 // ─── AUDIO — MICROPHONE ───────────────────────────────────────────────────────
 #define SAMPLE_RATE          16000

@@ -56,9 +56,10 @@ static volatile size_t spkRingHead = 0;
 static volatile size_t spkRingTail = 0;
 static volatile bool   spkPlaying  = false;
 static float           spkVolume   = SPK_VOLUME;
+static bool            spkI2SReady = false;
 
 // Speaker volume (0.0–1.0), adjusted via CMD:SPK_VOLUME
-static bool spkMuted = false;
+static bool spkMuted = true;
 
 // ─── TTS Packet State Machine ─────────────────────────────────────────────────
 // Tracks incoming TTS audio packets from the PC on the serial line
@@ -157,7 +158,14 @@ void initSpeakerI2S() {
   digitalWrite(PIN_SPK_SD, HIGH);  // HIGH = enabled
 #endif
 
+  spkI2SReady = true;
   Serial.println(STATUS_I2S_SPK_READY);
+}
+
+void ensureSpeakerI2S() {
+  if (!spkI2SReady) {
+    initSpeakerI2S();
+  }
 }
 
 // ─── Read Mic and Convert to 16-bit ──────────────────────────────────────────
@@ -221,7 +229,9 @@ void drainSpeakerBuffer() {
     if (spkPlaying) {
       spkPlaying = false;
       // Flush I2S TX to push any partial DMA buffer
-      i2s_zero_dma_buffer(I2S_SPK_PORT);
+      if (spkI2SReady) {
+        i2s_zero_dma_buffer(I2S_SPK_PORT);
+      }
       currentState = DeviceState::IDLE;
       ledSetState(LEDState::IDLE);
       Serial.println(STATUS_TTS_DONE);
@@ -251,6 +261,8 @@ void drainSpeakerBuffer() {
   }
 
   if (filled == 0) return;
+
+  ensureSpeakerI2S();
 
   size_t bytesWritten = 0;
   i2s_write(
@@ -361,6 +373,7 @@ void handleSerialInput() {
         }
 
       } else if (cmd == CMD_SPK_TEST) {
+        ensureSpeakerI2S();
         // Generate 440Hz tone directly via I2S — no serial audio path
         Serial.println("EAS_STATUS:SPK_TEST_START");
         static int16_t testBuf[512];
@@ -440,16 +453,16 @@ void setup() {
   Serial.printf("EAS_STATUS:SAMPLE_RATE_%d\n", SAMPLE_RATE);
 
   ledInit();
-  ledSetState(LEDState::IDLE);
+  ledSetState(LEDState::OFF);
 
 #if ENABLE_PUSH_TO_TALK
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   Serial.println("EAS_STATUS:PTT_ENABLED");
 #endif
 
-  // Initialise both I2S buses
+  // Keep startup quiet: initialize mic immediately but defer speaker I2S
+  // until first playback/test command.
   initMicI2S();
-  initSpeakerI2S();
 
   Serial.println(STATUS_READY);
 }
