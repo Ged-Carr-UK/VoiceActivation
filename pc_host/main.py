@@ -36,6 +36,7 @@ from config import (
     CMD_ERROR,
     CMD_PROCESSING,
     CMD_SPK_MUTE,
+    CMD_SPK_UNMUTE,
     CMD_START,
     CMD_STOP,
     CMD_SUCCESS,
@@ -229,6 +230,9 @@ def main() -> None:
     if DISABLE_SPEAKER_OUTPUT:
         serial.send_command(CMD_SPK_MUTE)
         log.info("Speaker output disabled: ESP32 muted and TTS send path bypassed.")
+    else:
+        # Keep speaker path enabled once at startup to avoid per-utterance unmute pops.
+        serial.send_command(CMD_SPK_UNMUTE)
 
     def set_ready_indicator() -> None:
         """Show amber/yellow while waiting for the next capture cycle."""

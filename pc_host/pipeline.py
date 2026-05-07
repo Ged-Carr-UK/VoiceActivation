@@ -37,10 +37,10 @@ log = logging.getLogger(__name__)
 
 # ─── Conversation history ─────────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
-    "You are a helpful voice assistant connected to an ESP32 device. "
-    "Keep responses concise and conversational — aim for 1 to 3 sentences. "
-    "Do not use markdown, bullet points, or numbered lists because your "
-    "response will be read aloud by a text-to-speech engine."
+    "You are a helpful voice assistant on an ESP32 device. "
+    "Reply in EXACTLY ONE short sentence — no more. "
+    "Do not use markdown, bullet points, or numbered lists; "
+    "your response will be read aloud by a text-to-speech engine."
 )
 
 _history: list[dict] = []

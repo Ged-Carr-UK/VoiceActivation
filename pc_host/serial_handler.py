@@ -15,10 +15,13 @@ PC → ESP32 stream:
 import logging
 import queue
 import threading
+import time
+from array import array
+import sys
 
 import serial
 
-from config import PCM_FOOTER, PCM_HEADER, SERIAL_BAUD, SERIAL_PORT
+from config import PCM_FOOTER, PCM_HEADER, SAMPLE_RATE, SERIAL_BAUD, SERIAL_PORT
 
 log = logging.getLogger(__name__)
 
@@ -62,12 +65,51 @@ class SerialHandler:
             log.debug("TX CMD: %s", cmd)
 
     def send_tts_audio(self, pcm_bytes: bytes) -> None:
-        """Frame PCM audio with TTS_HEADER/TTS_FOOTER and write to serial."""
-        from config import TTS_FOOTER, TTS_HEADER
+        """Frame PCM audio with TTS header/length and write to serial."""
+        import struct
+        from config import TTS_HEADER
         if self._ser and self._ser.is_open:
-            payload = TTS_HEADER + pcm_bytes + TTS_FOOTER
-            self._ser.write(payload)
-            log.debug("TX TTS: %d bytes", len(pcm_bytes))
+            # Smooth boundaries to reduce start/end squeaks (amp pop + abrupt waveform cuts).
+            # Apply asymmetric fades + silence padding around the utterance.
+            samples = array('h')
+            samples.frombytes(pcm_bytes)
+            if sys.byteorder != 'little':
+                samples.byteswap()
+
+            total = len(samples)
+            fade_in_samples = min(int(0.120 * SAMPLE_RATE), total)      # 120 ms (mask start transient)
+            fade_out_samples = min(int(0.004 * SAMPLE_RATE), total)     # 4 ms (minimal tail softening)
+
+            if fade_in_samples > 0:
+                denom_in = float(fade_in_samples)
+                for i in range(fade_in_samples):
+                    g = i / denom_in
+                    samples[i] = int(samples[i] * g)
+
+            if fade_out_samples > 0:
+                denom_out = float(fade_out_samples)
+                for i in range(fade_out_samples):
+                    g = i / denom_out
+                    j = total - 1 - i
+                    samples[j] = int(samples[j] * g)
+
+            pre_pad_samples = int(0.180 * SAMPLE_RATE)   # 180 ms to isolate start transient in silence
+            post_pad_samples = int(0.220 * SAMPLE_RATE)  # 220 ms to keep endings from feeling chopped
+            pre_pad = b"\x00\x00" * pre_pad_samples
+            post_pad = b"\x00\x00" * post_pad_samples
+            smoothed_pcm = pre_pad + samples.tobytes() + post_pad
+
+            # New protocol: HEADER (4) + LENGTH (4) + PCM
+            length_bytes = struct.pack('<I', len(smoothed_pcm))
+            payload = TTS_HEADER + length_bytes + smoothed_pcm
+            # Pace transmission close to playback rate: ~32 KB/s for 16 kHz mono int16 PCM.
+            # This avoids underruns (too slow) and ring overruns (too fast).
+            chunk_size = 288
+            inter_chunk_s = 0.010
+            for i in range(0, len(payload), chunk_size):
+                self._ser.write(payload[i:i + chunk_size])
+                time.sleep(inter_chunk_s)
+            log.debug("TX TTS: %d bytes (smoothed to %d bytes)", len(pcm_bytes), len(smoothed_pcm))
 
     # ─── Background reader ────────────────────────────────────────────────────
 

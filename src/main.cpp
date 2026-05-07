@@ -50,28 +50,32 @@ static int16_t  micPCM16[I2S_BUFFER_SAMPLES];
 
 // Speaker: incoming TTS bytes from serial, written to I2S
 // Ring buffer to decouple serial reads from I2S writes
-static const size_t SPK_RING_SIZE = 8192;  // 8KB — ~250ms at 16kHz 16-bit
+static const size_t SPK_RING_SIZE = 65536; // 64KB — ~2s at 16kHz 16-bit (prevents overflow on typical TTS responses)
 static uint8_t  spkRingBuf[SPK_RING_SIZE];
 static volatile size_t spkRingHead = 0;
 static volatile size_t spkRingTail = 0;
 static volatile bool   spkPlaying  = false;
+static volatile bool   spkPacketDone = false; // Set true when TTS footer received
 static float           spkVolume   = SPK_VOLUME;
 static bool            spkI2SReady = false;
 
 // Speaker volume (0.0–1.0), adjusted via CMD:SPK_VOLUME
-static bool spkMuted = true;
+static bool spkMuted = false;
 
 // ─── TTS Packet State Machine ─────────────────────────────────────────────────
 // Tracks incoming TTS audio packets from the PC on the serial line
 enum class TTSRxState {
   WAITING_HEADER,   // scanning for 0xEA 0x54 0x54 0x53
-  IN_PAYLOAD,       // accumulating audio bytes
-  WAITING_FOOTER    // looking for 0xEA 0x54 0x45 0x4E
+  READING_LENGTH,   // accumulating 4-byte length
+  IN_PAYLOAD,       // reading exactly ttsAudioLen bytes
 };
 
 static TTSRxState ttsRxState   = TTSRxState::WAITING_HEADER;
 static uint8_t    ttsHeaderIdx = 0;
-static uint8_t    ttsFooterIdx = 0;
+static uint8_t    ttsLenBuf[4];
+static uint8_t    ttsLenIdx   = 0;
+static uint32_t   ttsAudioLen  = 0;
+static uint32_t   ttsAudioRead = 0;
 
 // ─── Ring Buffer Helpers ──────────────────────────────────────────────────────
 inline size_t ringAvailable() {
@@ -168,6 +172,39 @@ void ensureSpeakerI2S() {
   }
 }
 
+void hardMuteSpeaker() {
+  spkMuted = true;
+  spkPlaying = false;
+  spkPacketDone = false;
+  spkRingHead = 0;
+  spkRingTail = 0;
+  ttsRxState = TTSRxState::WAITING_HEADER;
+  ttsHeaderIdx = 0;
+  ttsLenIdx = 0;
+  ttsAudioLen = 0;
+  ttsAudioRead = 0;
+
+  if (spkI2SReady) {
+    i2s_zero_dma_buffer(I2S_SPK_PORT);
+    i2s_stop(I2S_SPK_PORT);  // Stop BCLK/LRCK to silence DAC output path
+  }
+
+#if PIN_SPK_SD >= 0
+  digitalWrite(PIN_SPK_SD, LOW);  // LOW = shutdown (if wired)
+#endif
+}
+
+void hardUnmuteSpeaker() {
+  ensureSpeakerI2S();
+  if (spkI2SReady) {
+    i2s_start(I2S_SPK_PORT);
+  }
+#if PIN_SPK_SD >= 0
+  digitalWrite(PIN_SPK_SD, HIGH);  // HIGH = enabled
+#endif
+  spkMuted = false;
+}
+
 // ─── Read Mic and Convert to 16-bit ──────────────────────────────────────────
 bool readMicSamples(size_t &samplesRead) {
   size_t bytesRead = 0;
@@ -224,14 +261,15 @@ bool isSilent(size_t samples) {
 // Drains the ring buffer into I2S whenever data is available.
 // Call every loop() — writes up to one DMA buffer worth at a time.
 void drainSpeakerBuffer() {
+  if (spkMuted) {
+    return;
+  }
+
   if (spkRingHead == spkRingTail) {
-    // Ring buffer empty — if we were playing, we're done
-    if (spkPlaying) {
+    // Ring buffer empty — only signal done if the full packet has arrived
+    if (spkPlaying && spkPacketDone) {
       spkPlaying = false;
-      // Flush I2S TX to push any partial DMA buffer
-      if (spkI2SReady) {
-        i2s_zero_dma_buffer(I2S_SPK_PORT);
-      }
+      spkPacketDone = false;
       currentState = DeviceState::IDLE;
       ledSetState(LEDState::IDLE);
       Serial.println(STATUS_TTS_DONE);
@@ -270,7 +308,7 @@ void drainSpeakerBuffer() {
     spkWriteBuf,
     filled * sizeof(int16_t),
     &bytesWritten,
-    pdMS_TO_TICKS(20)
+    pdMS_TO_TICKS(50)  // Must exceed one DMA buffer period (512/16000 = 32ms)
   );
 }
 
@@ -281,44 +319,46 @@ void processTTSByte(uint8_t b) {
   switch (ttsRxState) {
 
     case TTSRxState::WAITING_HEADER:
-      // Look for TTS_HEADER sequence byte by byte
       if (b == TTS_HEADER[ttsHeaderIdx]) {
         ttsHeaderIdx++;
         if (ttsHeaderIdx == TTS_HEADER_LEN) {
           ttsHeaderIdx = 0;
-          ttsRxState   = TTSRxState::IN_PAYLOAD;
-          if (!spkPlaying) {
-            spkPlaying   = true;
-            currentState = DeviceState::SPEAKING;
-            ledSetState(LEDState::SPEAKING);
-            Serial.println(STATUS_TTS_PLAYING);
-          }
+          ttsLenIdx = 0;
+          ttsRxState = TTSRxState::READING_LENGTH;
         }
       } else {
         ttsHeaderIdx = 0;
       }
       break;
 
-    case TTSRxState::IN_PAYLOAD:
-      // Check if this byte starts the footer
-      if (b == TTS_FOOTER[ttsFooterIdx]) {
-        ttsFooterIdx++;
-        if (ttsFooterIdx == TTS_FOOTER_LEN) {
-          // Complete footer found — packet done
-          ttsFooterIdx = 0;
-          ttsRxState   = TTSRxState::WAITING_HEADER;
+    case TTSRxState::READING_LENGTH:
+      ttsLenBuf[ttsLenIdx++] = b;
+      if (ttsLenIdx == 4) {
+        ttsAudioLen = (uint32_t)ttsLenBuf[0] | ((uint32_t)ttsLenBuf[1] << 8) | 
+                      ((uint32_t)ttsLenBuf[2] << 16) | ((uint32_t)ttsLenBuf[3] << 24);
+        ttsAudioRead = 0;
+        ttsRxState = TTSRxState::IN_PAYLOAD;
+        if (!spkPlaying) {
+          spkPlaying = true;
+          if (spkI2SReady) {
+            // Start from a known silent DMA state to reduce boundary artifacts.
+            i2s_zero_dma_buffer(I2S_SPK_PORT);
+          }
+          currentState = DeviceState::SPEAKING;
+          ledSetState(LEDState::SPEAKING);
+          Serial.println(STATUS_TTS_PLAYING);
         }
-        // Don't write footer bytes to the ring buffer
-      } else {
-        // Not a footer byte — flush any partial footer match into ring buffer
-        for (uint8_t i = 0; i < ttsFooterIdx; i++) ringWrite(TTS_FOOTER[i]);
-        ttsFooterIdx = 0;
-        ringWrite(b);
       }
       break;
 
-    case TTSRxState::WAITING_FOOTER:
-      // Unused — handled inline in IN_PAYLOAD
+    case TTSRxState::IN_PAYLOAD:
+      // handleSerialInput() applies backpressure before consuming payload bytes.
+      if (!ringWrite(b)) break;
+      ttsAudioRead++;
+      if (ttsAudioRead >= ttsAudioLen) {
+        ttsRxState = TTSRxState::WAITING_HEADER;
+        spkPacketDone = true;
+      }
       break;
   }
 }
@@ -328,12 +368,21 @@ void processTTSByte(uint8_t b) {
 // Binary TTS audio bytes are routed through the TTS state machine.
 void handleSerialInput() {
   while (Serial.available()) {
+    // During binary payload ingest, do not consume serial bytes when the
+    // speaker ring is full. Let loop() drain I2S first, then resume RX.
+    if (ttsRxState == TTSRxState::IN_PAYLOAD) {
+      size_t next = (spkRingHead + 1) % SPK_RING_SIZE;
+      if (next == spkRingTail) {
+        break;
+      }
+    }
+
     // Peek at the next byte
     int peeked = Serial.peek();
     if (peeked < 0) break;
 
-    // If it looks like the start of a text command, read a full line
-    if (peeked == 'C') {  // All commands start with 'C' (CMD:...)
+    // Parse text commands only when not in the middle of a binary TTS packet.
+    if (ttsRxState == TTSRxState::WAITING_HEADER && peeked == 'C') {  // CMD:...
       String cmd = Serial.readStringUntil('\n');
       cmd.trim();
 
@@ -360,11 +409,10 @@ void handleSerialInput() {
       } else if (cmd == CMD_SUCCESS) {
         currentState = DeviceState::SUCCESS;
         ledSetState(LEDState::SUCCESS);
-        delay(800);
-        if (currentState == DeviceState::SUCCESS) {
-          currentState = DeviceState::IDLE;
-          ledSetState(LEDState::IDLE);
-        }
+        // No blocking delay — TTS audio may immediately follow this command.
+        // The SPEAKING state (set when TTS header arrives) overrides SUCCESS.
+        currentState = DeviceState::IDLE;
+        ledSetState(LEDState::IDLE);
 
       } else if (cmd == CMD_ERROR) {
         currentState = DeviceState::ERROR;
@@ -383,7 +431,7 @@ void handleSerialInput() {
         for (int rep = 0; rep < 80; rep++) {  // ~2 seconds
           for (int i = 0; i < 512; i++) {
             float t = (float)((rep * 512 + i) % (SAMPLE_RATE / 440)) / (SAMPLE_RATE / 440);
-            testBuf[i] = (int16_t)(sinf(2.0f * M_PI * t) * 28000);
+            testBuf[i] = (int16_t)(sinf(2.0f * M_PI * t) * 8000.0f * spkVolume);
           }
           size_t written = 0;
           i2s_write(I2S_SPK_PORT, testBuf, sizeof(testBuf), &written, pdMS_TO_TICKS(100));
@@ -394,10 +442,10 @@ void handleSerialInput() {
         ledSetState(LEDState::OFF);
 
       } else if (cmd == CMD_SPK_MUTE) {
-        spkMuted = true;
+        hardMuteSpeaker();
 
       } else if (cmd == CMD_SPK_UNMUTE) {
-        spkMuted = false;
+        hardUnmuteSpeaker();
 
       } else if (cmd.startsWith("CMD:SPK_VOLUME:")) {
         // e.g. "CMD:SPK_VOLUME:75"
@@ -447,6 +495,9 @@ void handleButton() {
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
+  // Increase UART RX buffering so high-rate TTS packets are not dropped
+  // while the speaker drain path services I2S in bursts.
+  Serial.setRxBufferSize(8192);
   Serial.begin(SERIAL_BAUD_RATE);
   // Avoid blocking forever when connected via UART bridge instead of native USB CDC.
   uint32_t serialWaitStart = millis();
@@ -468,7 +519,11 @@ void setup() {
 
   // Keep startup quiet: initialize mic immediately but defer speaker I2S
   // until first playback/test command.
+  // Speaker I2S: init at boot so it's ready for the first TTS packet.
+  // Deferring it caused a 5-second delay on first playback (CP2102 USB
+  // buffering hid the I2S_SPK_READY status while the host was mid-send).
   initMicI2S();
+  initSpeakerI2S();
 
   Serial.println(STATUS_READY);
 }

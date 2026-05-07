@@ -53,7 +53,7 @@
 // Update PIN_STRIP_DATA to the actual GPIO used on the AZ-Delivery board
 // before re-enabling LED support.
 #define PIN_STRIP_DATA    22
-#define STRIP_NUM_LEDS    4      // Number of LEDs on the strip
+#define STRIP_NUM_LEDS    7      // Number of LEDs on the strip
 #define STRIP_BRIGHTNESS  120    // 0–255 (120 = good indoor brightness)
 
 // ─── BUILT-IN LED ─────────────────────────────────────────────────────────────
