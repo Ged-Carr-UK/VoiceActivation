@@ -32,11 +32,14 @@ from openwakeword.model import Model as WakeWordModel
 
 from config import (
     AUDIO_INPUT_DEVICE,
+    AUTO_TRIGGER_INTERVAL_S,
     CMD_ERROR,
     CMD_PROCESSING,
+    CMD_SPK_MUTE,
     CMD_START,
     CMD_STOP,
     CMD_SUCCESS,
+    DISABLE_SPEAKER_OUTPUT,
     MAX_AUDIO_WAIT_S,
     MAX_TTS_WAIT_S,
     OLLAMA_MODEL,
@@ -223,6 +226,14 @@ def main() -> None:
     else:
         log.warning("ESP32 did not send READY within 15s — continuing anyway.")
 
+    if DISABLE_SPEAKER_OUTPUT:
+        serial.send_command(CMD_SPK_MUTE)
+        log.info("Speaker output disabled: ESP32 muted and TTS send path bypassed.")
+
+    def set_ready_indicator() -> None:
+        """Show amber/yellow while waiting for the next capture cycle."""
+        serial.send_command(CMD_PROCESSING)
+
     # ── Wake word detection ───────────────────────────────────────────────────
     wake_event = threading.Event()
     chunk_samples = int(SAMPLE_RATE * WAKE_WORD_CHUNK_MS / 1000)   # 1280 @ 16kHz
@@ -251,6 +262,7 @@ def main() -> None:
         """Run one full ESP32 capture -> STT -> LLM -> TTS turn."""
         log.info("--- Voice command triggered ---")
         drain_queue(serial.audio_queue)
+        drain_queue(serial.status_queue)
 
         # Tell ESP32 to start streaming
         serial.send_command(CMD_START)
@@ -261,6 +273,7 @@ def main() -> None:
         if not raw_audio:
             log.warning("No audio captured — returning to trigger mode.")
             serial.send_command(CMD_ERROR)
+            set_ready_indicator()
             log.info("Listening for trigger...")
             return
 
@@ -278,6 +291,7 @@ def main() -> None:
         if not transcript.strip():
             log.warning("Empty transcript — returning to trigger mode.")
             serial.send_command(CMD_ERROR)
+            set_ready_indicator()
             log.info("Listening for trigger...")
             return
 
@@ -289,49 +303,57 @@ def main() -> None:
             log.error("Ollama error: %s", exc)
             log.error("Is Ollama running? Try: ollama serve")
             serial.send_command(CMD_ERROR)
+            set_ready_indicator()
             log.info("Listening for trigger...")
             return
 
         log.info("Assistant: %r", reply)
 
-        # TTS -> ESP32
-        log.info("Synthesising speech (Piper)...")
-        try:
-            tts_pcm = synthesize_speech(reply, piper_voice)
-        except Exception as exc:
-            log.error("Piper TTS error: %s", exc)
-            serial.send_command(CMD_ERROR)
-            log.info("Listening for trigger...")
-            return
-
-        serial.send_command(CMD_SUCCESS)
-        serial.send_tts_audio(tts_pcm)
-        log.info("Sent %d bytes of TTS audio to ESP32.", len(tts_pcm))
-
-        # Wait for playback to finish
-        result = wait_for_status(
-            serial.status_queue,
-            [STATUS_TTS_DONE],
-            timeout=MAX_TTS_WAIT_S,
-        )
-        if result:
-            log.info("Playback complete.")
+        # TTS -> ESP32 (optional)
+        if DISABLE_SPEAKER_OUTPUT:
+            serial.send_command(CMD_SUCCESS)
+            log.info("Speaker output disabled — skipping TTS synthesis/playback.")
         else:
-            log.warning(
-                "TTS_DONE not received within %ds — continuing.", MAX_TTS_WAIT_S
-            )
+            log.info("Synthesising speech (Piper)...")
+            try:
+                tts_pcm = synthesize_speech(reply, piper_voice)
+            except Exception as exc:
+                log.error("Piper TTS error: %s", exc)
+                serial.send_command(CMD_ERROR)
+                set_ready_indicator()
+                log.info("Listening for trigger...")
+                return
 
+            serial.send_command(CMD_SUCCESS)
+            serial.send_tts_audio(tts_pcm)
+            log.info("Sent %d bytes of TTS audio to ESP32.", len(tts_pcm))
+
+            # Wait for playback to finish
+            result = wait_for_status(
+                serial.status_queue,
+                [STATUS_TTS_DONE],
+                timeout=MAX_TTS_WAIT_S,
+            )
+            if result:
+                log.info("Playback complete.")
+            else:
+                log.warning(
+                    "TTS_DONE not received within %ds — continuing.", MAX_TTS_WAIT_S
+                )
+
+        set_ready_indicator()
         log.info("Listening for trigger...")
 
     input_devices = [d for d in sd.query_devices() if d.get("max_input_channels", 0) > 0]
     if not input_devices:
-        log.warning("No PC microphone device found. Falling back to manual trigger mode.")
-        log.warning("Press Enter to start each command capture from the ESP32 mic.")
+        log.warning("No PC microphone device found. Falling back to auto-trigger mode.")
+        log.warning(
+            "Auto-trigger interval: %.1fs (set AUTO_TRIGGER_INTERVAL_S in .env).",
+            AUTO_TRIGGER_INTERVAL_S,
+        )
+        set_ready_indicator()
         while True:
-            try:
-                input("\nPress Enter to talk (Ctrl+C to quit)...")
-            except EOFError:
-                pass
+            time.sleep(max(0.2, AUTO_TRIGGER_INTERVAL_S))
             process_turn()
         return
 

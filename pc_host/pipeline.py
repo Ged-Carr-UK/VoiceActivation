@@ -86,8 +86,22 @@ def transcribe(model: whisper.Whisper, pcm_bytes: bytes) -> str:
     if not pcm_bytes:
         return ""
 
-    # Whisper expects float32 normalised to [-1, 1]
+    # Whisper expects float32 normalized to [-1, 1].
+    # Precondition captured audio to improve STT on low-amplitude mic signals.
     audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+    # Remove DC offset that can appear on I2S MEMS mics.
+    audio_np = audio_np - float(np.mean(audio_np))
+
+    peak = float(np.max(np.abs(audio_np))) if audio_np.size else 0.0
+    rms = float(np.sqrt(np.mean(np.square(audio_np)))) if audio_np.size else 0.0
+    log.info("STT input levels: rms=%.5f peak=%.5f", rms, peak)
+
+    # Normalize quieter captures to a workable level for Whisper.
+    if peak > 1e-6 and peak < 0.25:
+        gain = min(0.9 / peak, 20.0)
+        audio_np = np.clip(audio_np * gain, -1.0, 1.0)
+        log.info("Applied STT pre-gain: x%.2f", gain)
 
     result = model.transcribe(audio_np, fp16=False, language="en")
     text: str = result.get("text", "").strip()

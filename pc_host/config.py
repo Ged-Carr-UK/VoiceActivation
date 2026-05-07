@@ -75,3 +75,12 @@ PIPER_MODEL_PATH = os.getenv(
 MAX_AUDIO_WAIT_S  = 15    # Max seconds to wait for ESP32 audio stream to finish
 MAX_TTS_WAIT_S    = 30    # Max seconds to wait for ESP32 to finish playing TTS
 MAX_HISTORY_TURNS = 10    # Number of conversation turns to keep in context
+
+# No-PC-mic mode: auto-trigger ESP32 capture instead of requiring Enter.
+AUTO_TRIGGER_INTERVAL_S = float(os.getenv("AUTO_TRIGGER_INTERVAL_S", "2.0"))
+
+# When true, keep ESP32 speaker muted and skip sending TTS audio.
+# This is useful while debugging STT/LLM without speaker noise.
+DISABLE_SPEAKER_OUTPUT = os.getenv("DISABLE_SPEAKER_OUTPUT", "1").strip().lower() in (
+    "1", "true", "yes", "on"
+)

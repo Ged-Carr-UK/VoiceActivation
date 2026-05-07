@@ -71,7 +71,7 @@
 #define I2S_BUFFER_SAMPLES   512
 #define DMA_BUF_COUNT        8
 #define DMA_BUF_LEN          512
-#define MIC_GAIN             2.0f  // Increase if mic is quiet (try 3.0)
+#define MIC_GAIN             6.0f  // Boost capture level for reliable STT
 
 // ─── AUDIO — SPEAKER ──────────────────────────────────────────────────────────
 #define SPK_DMA_BUF_COUNT    8

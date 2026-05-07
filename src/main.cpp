@@ -101,7 +101,7 @@ void initMicI2S() {
     .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate          = SAMPLE_RATE,
     .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,  // INMP441 outputs 32-bit
-    .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,  // L/R → GND = left ch
+    .channel_format       = I2S_CHANNEL_FMT_ONLY_RIGHT, // Empirically active channel on current module
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count        = DMA_BUF_COUNT,
@@ -343,6 +343,9 @@ void handleSerialInput() {
       } else if (cmd == CMD_START) {
         currentState = DeviceState::LISTENING;
         ledSetState(LEDState::LISTENING);
+      #if ENABLE_VAD
+        lastSoundTime = millis();
+      #endif
         Serial.println(STATUS_STREAM_START);
 
       } else if (cmd == CMD_STOP) {
@@ -423,6 +426,9 @@ void handleButton() {
     if (currentState == DeviceState::IDLE) {
       currentState = DeviceState::LISTENING;
       ledSetState(LEDState::LISTENING);
+#if ENABLE_VAD
+      lastSoundTime = millis();
+#endif
       Serial.println(STATUS_BTN_START);
     }
   }
